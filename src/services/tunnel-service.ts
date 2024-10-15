@@ -1,5 +1,5 @@
 import { watch, writeFile, readFile, unlink } from 'fs/promises';
-import localtunnel from 'localtunnel';
+import { spawn } from 'child_process';
 import open from 'open';
 import { join, relative } from 'path';
 import { PLAYGROUND_URL } from '../config/constants';
@@ -98,19 +98,45 @@ async function setupAndValidate(tunnelUrl: string, pluginId: string): Promise<vo
 }
 
 async function setupTunnel(port: number): Promise<{ tunnelUrl: string; cleanup: () => Promise<void> }> {
-    try {
-        console.log("Setting up localtunnel...");
-        const tunnel = await localtunnel({ port });
-        console.log(`Localtunnel URL: ${tunnel.url}`);
-        return {
-            tunnelUrl: tunnel.url,
-            cleanup: async () => {
-                tunnel.close();
+    return new Promise((resolve, reject) => {
+        console.log("Setting up serveo tunnel...");
+        const serveo = spawn('ssh', ['-R', `80:localhost:${port}`, 'serveo.net'], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let tunnelUrl = '';
+
+        serveo.stdin.write('yes\n');  // Automatically answer 'yes' to create fingerprint
+
+        serveo.stdout.on('data', (data) => {
+            const output = data.toString();
+            console.log(output);
+            if (output.includes('Forwarding HTTP traffic from')) {
+                tunnelUrl = output.match(/https?:\/\/[^\s]+/)[0];
+                console.log(`Serveo URL: ${tunnelUrl}`);
+                resolve({
+                    tunnelUrl,
+                    cleanup: async () => {
+                        serveo.kill();
+                    }
+                });
             }
-        };
-    } catch (error) {
-        throw new Error("Failed to set up localtunnel.");
-    }
+        });
+
+        serveo.stderr.on('data', (data) => {
+            const output = data.toString();
+            console.error(`Serveo error: ${output}`);
+            if (output.includes('Are you sure you want to continue connecting')) {
+                serveo.stdin.write('yes\n');
+            }
+        });
+
+        serveo.on('close', (code) => {
+            if (code !== 0) {
+                reject(new Error(`Serveo process exited with code ${code}`));
+            }
+        });
+    });
 }
 
 export async function startLocalTunnelAndRegister(port: number): Promise<void> {
@@ -124,7 +150,6 @@ export async function startLocalTunnelAndRegister(port: number): Promise<void> {
     const fullCleanup = async () => {
         console.log('Terminating. Cleaning up...');
         await Promise.all([
-            
             (async () => {
                 try {
                     await unlink(BITTE_CONFIG_PATH);
@@ -143,9 +168,9 @@ export async function startLocalTunnelAndRegister(port: number): Promise<void> {
                 } catch (error) {
                     console.error('Error validating authentication or deleting plugin:', error);
                 }
-            })()    
+            })()
         ]);
-        await cleanup(),
+        await cleanup();
         process.exit(0);
     };
 
